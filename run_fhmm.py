@@ -1898,9 +1898,9 @@ def initial_corr_mats(params,
 start_time = time.time()
 
 # 原始数据地址与保存文件地址
-location = 'D:/Desktop/桌面旧/合并数据删1.xls'
-file_path = 'D:/Desktop/桌面旧/合并数据删1.xlsx'
-histr_location = 'D:/Desktop/桌面旧/历史数据1.xls'
+location = 'sample_data.xls'
+file_path = 'sample_data.xlsx'
+histr_location = 'sample_history.xls'
 
 # 读取数据与历史数据
 (observed_states, hidden_states,
