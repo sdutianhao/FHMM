@@ -1,12 +1,7 @@
-#5.6最终 无corr，退化成好结果
 import functools
-
-
 import itertools
 import operator
 import numpy as np
-# numpy=1.21.6，1.26.1不行
-# pandas=2.0.0，2,1,4不行
 import scipy
 import scipy.stats as stats
 from scipy.stats import kstest, norm, pearsonr
