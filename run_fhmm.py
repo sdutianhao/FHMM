@@ -1,7 +1,12 @@
+#5.6最终 无corr，退化成好结果
 import functools
+
+
 import itertools
 import operator
 import numpy as np
+# numpy=1.21.6，1.26.1不行
+# pandas=2.0.0，2,1,4不行
 import scipy
 import scipy.stats as stats
 from scipy.stats import kstest, norm, pearsonr
@@ -13,7 +18,10 @@ import time
 import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap
 from matplotlib.patches import Patch, FancyArrowPatch
-
+import numpy as np
+from scipy.special import digamma
+from sklearn.neighbors import NearestNeighbors  # 用于k-NN搜索的参考，但以下实现中手动计算
+from collections import Counter
 # 设置全局字体
 plt.rcParams['font.family'] = 'Times New Roman'
 # 设置全局字号
@@ -295,7 +303,12 @@ class FactorialHMM(object):
             max_vis = self.params.get('max_visibility', 10)
             EPS = 1e-300
 
-            if t < 10:
+            if t < 4 or t == T-1:
+                if t == T - 1:
+                    print("\n\n\n         ------------------------------------------------------")
+                    print("           ... Skipping output for intermediate time steps ...")
+                    print("         ------------------------------------------------------\n\n\n")
+
                 obs_view = observed_states[..., t].copy()
                 log_view = obs_view.copy()
                 log_view[0] = np.log(np.clip(log_view[0], 1e-12, None))  # PM10
@@ -316,7 +329,7 @@ class FactorialHMM(object):
                     print(f"    观测值权重 W      = {weight_list}\n")
 
                 # ---- A) 单维概率 & 乘积（含零膨胀，不含权重） ----
-                print("  ------ 单维概率与零膨胀修正 ------")
+                print("  ------ 各个隐藏链发射概率（零膨胀修正） ------")
                 zero_prod_list = []  # ← 用来收集 π·Πp_e
                 for idx_h, (z1, z2) in enumerate(self.all_hidden_states):
                     probs_feat = np.zeros(E)
@@ -449,24 +462,26 @@ class FullDiscreteFactorialHMM(FactorialHMM):
 
     def GetObservedGivenHidden(self, observed_state, observed_weights, n_step):
         """
-        计算联合密度 P(x_t | z_t) ——
-          • 保留边缘分布（对数/零膨胀对数正态，含权重与归一化）
-          • 通过 Gaussian Copula 引入四个观测量之间的相关性
-          • 若相关矩阵非正定或求逆失败，自动回退为“独立”模型
-        所有原变量名、打印与注释均保持不变，只插入了数值保护逻辑。
+        计算联合密度 P(x_t | z_t)
+
+        corr_mode:
+          0 → 无相关 (R = I)
+          1 → 全局 Gaussian Copula
+          2 → 状态依赖 Gaussian Copula
+          3 → 全局联合正态 (z1+z2==0 时退化独立)
+          4 → 状态依赖联合正态 (z1+z2==0 时退化独立)
+        其余注释、格式、输出保持不变，可直接覆盖。
         """
         import numpy as np
         from scipy.stats import lognorm, norm
 
-        EPS       = 1e-300        # 最小概率，防止 log(0)
-        MIN_SIGMA = 1e-2          # σ 下限
-        MAX_QUAD  = 50            # ‖z‖²·(R⁻¹−I) 截断防溢出
-        K, _, E   = self.mus.shape
+        EPS, MIN_SIGMA, MAX_QUAD = 1e-300, 1e-2, 50
+        K, _, E = self.mus.shape
 
-        x_vec     = np.asarray(observed_state, dtype=float)
+        x_vec      = np.asarray(observed_state, dtype=float)
         log_unnorm = np.full(self.hidden_indices.field_sizes, -np.inf)
 
-        # —— 内部工具：特征归一化常数 ln Z —— #
+        # —— 辅助：每维归一化常数 ln Z —— #
         def log_norm_feat(w, mu, sigma):
             w = max(w, 1e-8)
             if np.isclose(w, 1.0):
@@ -476,32 +491,35 @@ class FullDiscreteFactorialHMM(FactorialHMM):
                     - 0.5 * np.log(w)
                     + mu + sigma ** 2 / (2 * w))
 
-        # —— 遍历所有隐藏状态 (z1,z2) —— #
+        # —— 遍历所有隐藏状态 —— #
         for (z1, z2) in self.all_hidden_states:
             hid  = (z1, z2)
             wvec = observed_weights[z1, z2, :]
 
-            logpdf, logZ, uvec = np.zeros(E), np.zeros(E), np.zeros(E)
+            logpdf = np.zeros(E)
+            logZ   = np.zeros(E)
+            uvec   = np.zeros(E)
 
-            # —— 1) 逐特征边缘 —— #
+            mode = self.params.get('corr_mode', 1)
+
+            # —— 1) 逐维边缘密度 —— #
             for e in range(E):
                 mu    = self.mus[hid][e]
                 sigma = max(self.sigmas[hid][e], MIN_SIGMA)
                 obs   = x_vec[e]
 
-                if e in [0, 1, 3]:          # 普通对数正态
+                if e in [0, 1, 3]:
                     pdf = lognorm(s=sigma, scale=np.exp(mu)).pdf(obs)
                     cdf = lognorm(s=sigma, scale=np.exp(mu)).cdf(obs)
                     logpdf[e] = np.log(max(pdf, EPS))
                     logZ[e]   = log_norm_feat(wvec[e], mu, sigma)
-                    uvec[e]   = np.clip(cdf, 1e-9, 1 - 1e-9)
-
-                else:                       # 能见度：零膨胀对数正态
+                    uvec[e]   = np.clip(cdf, 1e-9, 1-1e-9)
+                else:  # 能见度：零膨胀对数正态
                     π0      = self.params['zero_inflation_pi']
                     max_vis = self.params.get('max_visibility', 10)
-                    if hid == (0, 0):       # 仅晴朗状态零膨胀
+                    if hid == (0, 0):
                         if obs == max_vis:
-                            pdf, cdf = π0, π0
+                            pdf = cdf = π0
                         else:
                             pdf_c = lognorm(s=sigma, scale=np.exp(mu)).pdf(obs)
                             cdf_c = lognorm(s=sigma, scale=np.exp(mu)).cdf(obs)
@@ -509,50 +527,60 @@ class FullDiscreteFactorialHMM(FactorialHMM):
                             cdf = π0 + (1 - π0) * cdf_c
                         logpdf[e] = np.log(max(pdf, EPS))
                         ln_c  = log_norm_feat(wvec[e], mu, sigma)
-                        logZ[e] = np.logaddexp(wvec[e]*np.log(π0),
-                                               wvec[e]*np.log(1-π0) + ln_c)
-                        uvec[e] = np.clip(cdf, 1e-9, 1 - 1e-9)
-                    else:                   # 其它状态仍用对数正态
+                        logZ[e] = np.logaddexp(wvec[e] * np.log(π0),
+                                               wvec[e] * np.log(1 - π0) + ln_c)
+                        uvec[e] = np.clip(cdf, 1e-9, 1-1e-9)
+                    else:
                         pdf = lognorm(s=sigma, scale=np.exp(mu)).pdf(obs)
                         cdf = lognorm(s=sigma, scale=np.exp(mu)).cdf(obs)
                         logpdf[e] = np.log(max(pdf, EPS))
                         logZ[e]   = log_norm_feat(wvec[e], mu, sigma)
-                        uvec[e]   = np.clip(cdf, 1e-9, 1 - 1e-9)
+                        uvec[e]   = np.clip(cdf, 1e-9, 1-1e-9)
 
-            # —— 2) Copula 密度 —— #
-            # === ★★ 新增：相关矩阵退化开关 ★★ ===
-            if self.params.get('force_corr_identity', False):
-                R = np.eye(E)                           # ← 总是单位矩阵
-            else:
+            # —— 2) 相关矩阵 R 选择 —— #
+            if mode == 0:
+                R = np.eye(E)
+
+            elif mode == 1:          # 全局 Gaussian Copula
+                R = self.params['corr_mats'][0, 0]
+
+            elif mode == 2:          # 状态依赖 Gaussian Copula
                 R = self.params['corr_mats'][z1, z2]
 
+            elif mode == 3:          # 全局联合正态 (退化条件)
+                R = np.eye(E) if (z1 + z2) == 0 else self.params['corr_mats'][0, 0]
+
+            elif mode == 4:          # 状态依赖联合正态 (退化条件)
+                R = np.eye(E) if (z1 + z2) == 0 else self.params['corr_mats'][z1, z2]
+
+            else:
+                raise ValueError(f"Invalid corr_mode = {mode}")
+
+            # —— 3) Copula 密度项 —— #
             if not np.allclose(R, np.eye(E)):
                 try:
-                    z      = np.clip(norm.ppf(uvec), -8.0, 8.0)   # 尾部裁剪
-                    sign, logdet = np.linalg.slogdet(R)
-                    if sign <= 0 or np.isnan(logdet):
+                    z        = np.clip(norm.ppf(uvec), -8.0, 8.0)
+                    sign, ld = np.linalg.slogdet(R)
+                    if sign <= 0 or np.isnan(ld):
                         raise np.linalg.LinAlgError
-                    invR   = np.linalg.inv(R)
-                    quad   = z @ (invR - np.eye(E)) @ z
-                    quad   = np.clip(quad, -MAX_QUAD, MAX_QUAD)
-                    log_cop = -0.5 * logdet - 0.5 * quad
+                    invR = np.linalg.inv(R)
+                    quad = z @ (invR - np.eye(E)) @ z
+                    quad = np.clip(quad, -MAX_QUAD, MAX_QUAD)
+                    log_cop = -0.5 * ld - 0.5 * quad
                 except Exception as err:
                     print(f"[Warn] Copula fallback ({z1},{z2}):", err)
                     log_cop = 0.0
             else:
                 log_cop = 0.0
 
-            # —— 3) 合成 —— #
+            # —— 4) 合成总对数密度 —— #
             log_p = (wvec * logpdf).sum() + log_cop - logZ.sum()
             log_unnorm[hid] = log_p
 
-        # —— 4) log-sum-exp 归一化 —— #
+        # —— 5) log-sum-exp 归一化 —— #
         M = np.max(log_unnorm)
         probs = np.exp(log_unnorm - M)
         probs /= probs.sum()
-
-
-
         return probs
 
     # 根据发射矩阵抽样
@@ -576,40 +604,39 @@ class FullDiscreteFactorialHMM(FactorialHMM):
 
     def MStep(self, observed_states, alphas, betas, gammas, scaling_constants):
         """
-        ---------- EM 算法 M 步 ( corr 与 Z 无关版本 ) ----------
-        * 0  常量与形状处理
-        * 1  初始分布 / 转移矩阵                    —— 保留旧实现
-        * 2  发射分布参数 μ、σ                    —— 保留旧实现
-        * 2-B 绑定 (1,0) / (0,1) 能见度参数       —— 保留旧实现
-        * 3  单一全局相关矩阵 R_global            —— 与 Z 无关，每轮重新估计
-        * 4  返回参数字典
+        ---------- EM 算法 M 步 ----------
+        * corr_mode 0 / 1 / 3 → 估计单一全局相关矩阵 R_global 并广播
+        * corr_mode 2 / 4     → 为每个 (a,b) 独立估计相关矩阵 R_(a,b)
+                                (若 gamma_ab 总权重为 0，则回退成 R_global 并打印；
+                                 corr_mode=4 且 (a,b)==(0,0) 则强制退化为 I)
+        其它逻辑保持原状
         """
+
         # ===== 0. 通用导入与常量 =====
         import numpy as np
         from numpy.linalg import eigh
         from scipy.stats import norm
         from scipy.optimize import root
 
-        MIN_SIG  = 1e-2
-        MIN_SIG2 = MIN_SIG ** 2
-        EIG_EPS  = 1e-6
-        LOG_EPS  = 1e-6
-        max_vis  = self.params.get('max_visibility', 10)
+        MIN_SIG, MIN_SIG2 = 1e-2, 1e-4
+        EIG_EPS, LOG_EPS  = 1e-6, 1e-6
+        max_vis = self.params.get('max_visibility', 10)
 
         # ---- 形状校正 ----
         if observed_states.ndim == 1:
-            observed_states = observed_states.reshape(1, -1)      # (E,T)
+            observed_states = observed_states.reshape(1, -1)
         if observed_states.shape[0] < observed_states.shape[1]:
-            X = observed_states                                   # (E,T)
+            X = observed_states
         else:
-            X = observed_states.T                                 # 转置为 (E,T)
+            X = observed_states.T
         E, T = X.shape
 
-        K   = self.params['hidden_alphabet_size']
-        HN  = self.params['n_hidden_chains']
-        π0  = self.params.get('zero_inflation_pi', 0.99)
+        K = self.params['hidden_alphabet_size']
+        HN = self.params['n_hidden_chains']
+        π0 = self.params.get('zero_inflation_pi', 0.99)
+        mode = self.params.get('corr_mode', 1)
 
-        # ===== 1. 初始分布与转移矩阵 =====
+        # ===== 1. 初始分布 / 转移矩阵 =====
         initial_hidden_state_est = np.zeros((self.n_hidden_states, K))
         transition_est           = np.zeros((self.n_hidden_states, K, K))
         for chain in range(self.params['n_hidden_chains']):
@@ -618,13 +645,12 @@ class FullDiscreteFactorialHMM(FactorialHMM):
             gms = self.CollapseGammas(gammas, chain)
             initial_hidden_state_est[chain] = gms[:, 0] / gms[:, 0].sum()
             transition_est[chain] = (
-                xis.sum(-1) / gms[:, :-1].sum(1)[:, None]
+                    xis.sum(-1) / gms[:, :-1].sum(1)[:, None]
             ).T
 
-        # ===== 2. 发射分布参数 μ、σ =====
-        self.mus       = np.zeros((K, K, E))
-        self.sigmas    = np.zeros_like(self.mus)
-        self.corr_mats = np.zeros((K, K, E, E))      # 先占位
+        # ===== 2. μ、σ =====
+        self.mus    = np.zeros((K, K, E))
+        self.sigmas = np.zeros_like(self.mus)
 
         for e in range(E):
             obs = X[e, :]
@@ -636,7 +662,6 @@ class FullDiscreteFactorialHMM(FactorialHMM):
                         self.sigmas[a, b, e] = self.params['sigmas'][a, b, e]
                         continue
 
-                    # ----- A) 对数正态：PM10 / 风速 / 相对湿度 -----
                     if e in [0, 1, 3]:
                         mask  = obs > 0
                         γ_pos = γ[mask]
@@ -644,10 +669,8 @@ class FullDiscreteFactorialHMM(FactorialHMM):
                         S     = γ_pos.sum()
                         mu    = (γ_pos * y).sum() / S
                         var   = (γ_pos * (y - mu) ** 2).sum() / S
-
-                    # ----- B) 能见度 (e == 2) -----
-                    else:
-                        if (a, b) == (0, 0):          # 截尾 + 零膨胀
+                    else:  # 能见度
+                        if (a, b) == (0, 0):
                             mask_cont = (obs > 0) & (obs < max_vis)
                             γ_cont    = γ[mask_cont]
                             y_cont    = np.log(obs[mask_cont])
@@ -660,24 +683,21 @@ class FullDiscreteFactorialHMM(FactorialHMM):
                                 mu, log_s2 = vars
                                 s2    = np.exp(log_s2)
                                 sigma = np.sqrt(s2)
-                                alpha = (np.log(max_vis) - mu) / sigma
-                                Phiα  = norm.cdf(alpha)
-                                φα    = norm.pdf(alpha)
+                                α     = (np.log(max_vis) - mu) / sigma
+                                Φα    = norm.cdf(α)
+                                φα    = norm.pdf(α)
 
-                                dlnF_dmu = -φα / (Phiα * sigma)
-                                dlnF_ds2 = φα / Phiα * (-(np.log(max_vis) - mu) /
-                                                        (2 * sigma ** 3))
+                                dlnF_dmu = -φα / (Φα * sigma)
+                                dlnF_ds2 = φα / Φα * (-(np.log(max_vis) - mu) / (2 * sigma ** 3))
 
-                                dQ_dmu = ((γ_cont * (y_cont - mu)) / s2).sum() \
-                                         - S_cont * dlnF_dmu
-                                dQ_ds2 = ((γ_cont * ((y_cont - mu) ** 2 / s2 - 1)) /
-                                          (2 * s2)).sum() - S_cont * dlnF_ds2
+                                dQ_dmu = ((γ_cont * (y_cont - mu)) / s2).sum() - S_cont * dlnF_dmu
+                                dQ_ds2 = ((γ_cont * ((y_cont - mu) ** 2 / s2 - 1)) / (2 * s2)).sum() - S_cont * dlnF_ds2
                                 return [dQ_dmu, dQ_ds2]
 
                             sol = root(equations, [mu0, np.log(var0)])
                             mu  = sol.x[0]
                             var = np.exp(sol.x[1])
-                        else:                            # 普通对数正态
+                        else:
                             mask  = obs > 0
                             γ_pos = γ[mask]
                             y     = np.log(obs[mask])
@@ -689,8 +709,8 @@ class FullDiscreteFactorialHMM(FactorialHMM):
                     self.mus[a, b, e]    = mu
                     self.sigmas[a, b, e] = np.sqrt(var)
 
-        # # ===== 2-B 绑定雾霾 (1,0) & 沙尘 (0,1) 能见度参数 =====
-        # # # -------- Option A (默认) : 加权平均 ---------- #
+        # ===== 2-B 绑定雾霾 (1,0) & 沙尘 (0,1) 能见度参数 =====
+        # -------- Option A (默认) : 加权平均 ---------- #
         # S_h, S_d = gammas[1, 0].sum(), gammas[0, 1].sum()
         # if S_h + S_d > 0:
         #     μh, μd = self.mus[1, 0, 2], self.mus[0, 1, 2]
@@ -701,43 +721,65 @@ class FullDiscreteFactorialHMM(FactorialHMM):
         #     self.mus[1, 0, 2] = self.mus[0, 1, 2] = μc
         #     self.sigmas[1, 0, 2] = self.sigmas[0, 1, 2] = σc
 
-        # # -------- Option B : 简单算术平均（若需要请启用） ---------- #
+        # -------- Option B : 简单算术平均（若需要请启用） ---------- #
         # μ̄ = (self.mus[0, 1, 2] + self.mus[1, 0, 2]) / 2
         # σ̄ = (self.sigmas[0, 1, 2] + self.sigmas[1, 0, 2]) / 2
         # for (i, j) in [(0, 1), (1, 0)]:
         #     self.mus[i, j, 2]    = μ̄
         #     self.sigmas[i, j, 2] = σ̄
 
-        # ===== 3. 全局相关矩阵 R_global (与 Z 无关) =====
-        # ---- 3-A 计算残差 ----
-        X_log_all = np.log(np.clip(X, LOG_EPS, None))              # (E,T)
-        #   μ̂_t = Σ_{ab} γ_ab(t) * μ_ab  →  shape (E,T)
-        mu_hat = np.einsum('abe,abt->et', self.mus, gammas)
-        R_e    = X_log_all - mu_hat                                 # 残差 (E,T)
+        # ===== 3. 计算一次全局相关矩阵 R_global =====
+        X_log_all = np.log(np.clip(X, LOG_EPS, None))                    # (E,T)
+        mu_hat    = np.einsum('abe,abt->et', self.mus, gammas)           # (E,T)
+        R_e       = X_log_all - mu_hat
+        w_t       = gammas.sum(axis=(0, 1))
+        cov       = (R_e * w_t) @ R_e.T / w_t.sum()                      # (E,E)
 
-        #   权重 w_t = Σ_{ab} γ_ab(t)  (形状 (T,))
-        w_t    = gammas.sum(axis=(0, 1))
-        W_sum  = w_t.sum()
-        # ---- 3-B 加权协方差 ----
-        cov = (R_e * w_t) @ R_e.T / W_sum                           # (E,E)
-
-        # ---- 3-C → 相关矩阵，正定修补 ----
         std = np.sqrt(np.diag(cov))
         std[std < MIN_SIG] = MIN_SIG
         R_global = cov / std[:, None] / std[None, :]
-
         R_global = np.clip(0.5 * (R_global + R_global.T), -0.999, 0.999)
         vals, _  = eigh(R_global)
         if vals.min() < EIG_EPS:
             R_global += np.eye(E) * (EIG_EPS - vals.min() + 1e-8)
 
-        if self.params.get('force_corr_identity', False):
-            R_global = np.eye(E)
+        # ===== 4. 根据 corr_mode 填充 self.corr_mats =====
+        if mode in (2, 4):  # 状态依赖分支，含 fallback & degenerate
+            self.corr_mats = np.zeros((K, K, E, E))
+            for a in range(K):
+                for b in range(K):
+                    # corr_mode=4 且 (0,0) 强退化
+                    if mode == 4 and (a + b) == 0:
+                        self.corr_mats[a, b] = np.eye(E)
+                        continue
+                    γ_ab = gammas[a, b, :]
+                    if γ_ab.sum() == 0:
+                        print(f"[Info] gamma sum zero at state ({a},{b}), fallback to R_global")
+                        self.corr_mats[a, b] = R_global
+                        continue
 
-        # ---- 3-D 广播到所有 (a,b) ----
-        self.corr_mats = np.tile(R_global, (K, K, 1, 1)).reshape(K, K, E, E)
+                    R_ab   = X_log_all - self.mus[a, b, :, None]
+                    cov_ab = (R_ab * γ_ab) @ R_ab.T / γ_ab.sum()
 
-        # ===== 4. 返回 =====
+                    std_ab = np.sqrt(np.diag(cov_ab))
+                    std_ab[std_ab < MIN_SIG] = MIN_SIG
+                    R_tmp  = cov_ab / std_ab[:, None] / std_ab[None, :]
+                    R_tmp  = np.clip(0.5 * (R_tmp + R_tmp.T), -0.999, 0.999)
+                    vals_ab, _ = eigh(R_tmp)
+                    if vals_ab.min() < EIG_EPS:
+                        R_tmp += np.eye(E) * (EIG_EPS - vals_ab.min() + 1e-8)
+
+                    self.corr_mats[a, b] = R_tmp
+
+        else:  # 全局分支，含 mode==0 与 mode==1/3
+            R_broadcast = np.eye(E) if mode == 0 else R_global
+            self.corr_mats = np.tile(R_broadcast, (K, K, 1, 1)).reshape(K, K, E, E)
+
+            if mode == 3:
+                # 只对 (0,0) 这个格子做退化
+                self.corr_mats[0, 0] = np.eye(E)
+
+        # ===== 5. 返回 =====
         return {
             'hidden_alphabet_size': K,
             'n_hidden_chains'     : HN,
@@ -749,7 +791,7 @@ class FullDiscreteFactorialHMM(FactorialHMM):
             'sigmas'              : self.sigmas,
             'corr_mats'           : self.corr_mats,
             'zero_inflation_pi'   : π0,
-            'force_corr_identity' : self.params.get('force_corr_identity', False),
+            'corr_mode'           : mode,
         }
 
     def EM(self,
@@ -769,6 +811,10 @@ class FullDiscreteFactorialHMM(FactorialHMM):
         n_iter             = 0
         print_corr         = False          # 如要打印 corr_mats 改成 True
 
+        # 消灭（1，1）
+        self.params["mus"][1, 1, :] = 0
+        self.params["sigmas"][1, 1, :] = 0.0001
+
         # 用当前 params 创建模型
         H = FullDiscreteFactorialHMM(self.params, self.n_steps, True)
 
@@ -776,8 +822,6 @@ class FullDiscreteFactorialHMM(FactorialHMM):
             # ---------- E 步 ----------
             alphas, betas, gammas, scaling_constants, log_likelihood = \
                 H.EStep(observed_states)
-
-
 
             # ─── 新增：统计 MAP 到 (1,1) 的时刻数 ─────────
             K = gammas.shape[0]
@@ -906,6 +950,287 @@ def hidden_encoded(hidden_states):
             encoded_array[i] = [0, 1]
     return encoded_array.T
 
+
+
+
+
+def _reimplemented_estimate_mi_dd(feature_vec, target_vec):
+    """
+    估计离散特征和离散目标之间的互信息。
+    """
+    # 输入校验
+    if feature_vec.ndim != 1 or target_vec.ndim != 1:
+        raise ValueError("特征向量和目标向量必须是一维的。")
+    if len(feature_vec) != len(target_vec):
+        raise ValueError("特征向量和目标向量必须具有相同的长度。")
+
+    N = len(target_vec)
+    if N == 0:
+        return 0.0
+
+    # 构建列联表 (频数)
+    classes_y = np.unique(target_vec)
+    classes_x = np.unique(feature_vec)
+
+    contingency_table = np.zeros((len(classes_x), len(classes_y)))
+    for i, val_x in enumerate(classes_x):
+        for j, val_y in enumerate(classes_y):
+            contingency_table[i, j] = np.sum((feature_vec == val_x) & (target_vec == val_y))
+
+    # 计算概率 P(x,y), P(x), P(y)
+    joint_prob = contingency_table / N
+    # P(x) - 边缘概率
+    p_x = np.sum(joint_prob, axis=1, keepdims=True)
+    # P(y) - 边缘概率
+    p_y = np.sum(joint_prob, axis=0, keepdims=True)
+
+    mi = 0.0
+    # 避免 log(0) 和除以0
+    # 使用 np.where 来保护计算
+    # P(x)P(y)
+    # p_x 是 (n_classes_x, 1), p_y 是 (1, n_classes_y)
+    # p_x @ p_y 得到 (n_classes_x, n_classes_y) 的外积矩阵
+    # 或者直接使用广播： p_x * p_y
+    denominator = p_x * p_y
+
+    # 只对 joint_prob > 0 的项计算
+    terms = np.zeros_like(joint_prob, dtype=float)  # 确保是浮点数类型
+    valid_mask = (joint_prob > 1e-12) & (denominator > 1e-12)  # 使用小的epsilon避免浮点问题
+
+    terms[valid_mask] = joint_prob[valid_mask] * np.log(
+        joint_prob[valid_mask] / denominator[valid_mask]
+    )
+    mi = np.sum(terms)
+
+    return max(0.0, mi)  # 确保非负
+
+
+def _reimplemented_estimate_mi_cd(feature_vec, target_vec, n_neighbors, rng):
+    """
+    估计连续特征和离散目标之间的互信息。
+    使用基于Ross (2014) 和 Kraskov et al. (2004) 的k-NN估计器。
+    """
+    # 输入校验
+    if feature_vec.ndim != 1 or target_vec.ndim != 1:
+        raise ValueError("特征向量和目标向量必须是一维的。")
+    if len(feature_vec) != len(target_vec):
+        raise ValueError("特征向量和目标向量必须具有相同的长度。")
+    if n_neighbors <= 0:
+        raise ValueError("n_neighbors 必须为正数。")
+
+    N = len(target_vec)
+    if N == 0:
+        return 0.0
+
+    # 1. 对连续特征进行抖动 (Jittering)
+    feature_jittered = feature_vec.copy().astype(np.float64)
+    if N > 1:
+        sorted_unique_vals = np.sort(np.unique(feature_jittered))
+        if len(sorted_unique_vals) < N:  # 存在重复值
+            min_diff = np.min(np.diff(sorted_unique_vals)) if len(sorted_unique_vals) > 1 else 1e-5
+            # 噪声尺度应非常小，以避免显著改变数据分布
+            noise_scale = min_diff * 1e-6 if min_diff > 0 else 1e-10
+            if noise_scale == 0:  # 如果所有值都相同，min_diff可能是0
+                noise_scale = 1e-10  # 使用一个绝对的小噪声
+            feature_jittered += rng.uniform(-noise_scale, noise_scale, size=feature_jittered.shape)
+
+    # Ross 2014 MI estimator: I(X,Y) = ψ(N) - <ψ(Nx)> + ψ(k) - <ψ(mi)>
+    # X is discrete (target_vec), Y is continuous (feature_jittered)
+    # k is n_neighbors
+
+    psi_N = digamma(N)
+
+    unique_classes, class_counts = np.unique(target_vec, return_counts=True)
+
+    # <ψ(Nx)> term: 对每个样本i，其类别为cx_i，使用Nx_i (该类别的样本数)
+    psi_Nx_terms = np.zeros(N, dtype=float)
+    class_map_counts = {cls_val: count for cls_val, count in zip(unique_classes, class_counts)}
+    for i in range(N):
+        Nx_i = class_map_counts[target_vec[i]]
+        if Nx_i <= 0:  # 不应发生
+            return 0.0
+        psi_Nx_terms[i] = digamma(Nx_i)
+    avg_psi_Nx = np.mean(psi_Nx_terms) if N > 0 else 0.0
+
+    psi_k = digamma(n_neighbors)
+
+    # <ψ(mi)> term
+    psi_mi_terms = np.zeros(N, dtype=float)
+    feature_reshaped = feature_jittered.reshape(-1, 1)  # k-NN通常需要2D输入
+
+    for i in range(N):
+        current_val_scalar = feature_jittered[i]  # 标量值
+        current_class = target_vec[i]
+
+        # 1. 找到当前点在其类别内的第k个近邻距离 (epsilon_half)
+        class_mask = (target_vec == current_class)
+        feature_in_class = feature_jittered[class_mask]  # 1D array
+        num_in_class = len(feature_in_class)
+
+        if num_in_class <= n_neighbors:
+            # 如果类内样本数不足以找到k个不同的邻居（不包括自身）
+            # 或者等于k个，第k个是自身或最远的点。
+            # Ross的论文假设 Nx >= k。sklearn的行为可能是在这种情况下返回0 MI。
+            # 为了稳健性，如果无法可靠计算，则该特征的MI可能应为0。
+            # 此处我们让该点的psi_mi贡献为psi(1)，这可能导致MI不为0。
+            # 一个更接近sklearn的行为可能是如果任何Nx < n_neighbors，则整个特征MI为0。
+            # 或者，如果num_in_class <= n_neighbors，则该点的epsilon_half可能无法良好定义
+            # 或导致m_i的计算出现问题。
+            # 暂定：如果一个类别的点太少，无法找到k个邻居，则该点的mi贡献设为psi(1)
+            # 这需要与sklearn的行为仔细对比。
+            # 如果num_in_class == 0 (不应发生，因为current_val来自该类)
+            # 如果num_in_class <= n_neighbors，则第k个邻居的距离可能定义不佳或非常大。
+            psi_mi_terms[i] = digamma(1)  # psi(1) = -EulerMascheroni
+            continue
+
+        # 计算到同类中其他所有点的距离
+        distances_to_classmates = np.abs(feature_in_class - current_val_scalar)
+        distances_to_classmates.sort()  # 排序后，第一个元素是0 (到自身的距离)
+
+        # 第k个邻居的距离。distances_to_classmates是自身。
+        # distances_to_classmates[1]是第1近邻。
+        # distances_to_classmates[n_neighbors]是第k近邻。
+        if n_neighbors >= len(distances_to_classmates):  # 如果k大于类内点数（减1，因为有自身）
+            epsilon_half = distances_to_classmates[-1]  # 取最远的距离
+        else:
+            epsilon_half = distances_to_classmates[n_neighbors]
+
+        # 2. 统计全局数据集中有多少点落在 epsilon_half 距离内 (不含自身)
+        # m_i: number of points x_j in X (full dataset) such that ||x_j - x_i|| < epsilon_half
+        # (excluding x_i itself)
+        # 注意：KSG论文和一些实现对这里的 "<" 或 "<=" 有不同处理。
+        # Ross (2014) 描述为 "number of points m_i whose distance from y_i is strictly less than ε_i/2"
+        # 这里 epsilon_half 对应 Ross 的 ε_i/2
+        count_mi = 0
+        for j in range(N):
+            if i == j:
+                continue
+            # 严格小于
+            if np.abs(feature_jittered[j] - current_val_scalar) < epsilon_half:
+                count_mi += 1
+
+        mi_val = count_mi  # 这就是 m_i
+
+        if mi_val <= 0:
+            # 如果 m_i = 0, digamma(0) 是负无穷。
+            # 使用 digamma(1) 作为启发式处理，避免错误。
+            psi_mi_terms[i] = digamma(1)
+        else:
+            psi_mi_terms[i] = digamma(mi_val)
+
+    avg_psi_mi = np.mean(psi_mi_terms) if N > 0 else 0.0
+
+    # 互信息计算
+    mi = psi_N - avg_psi_Nx + psi_k - avg_psi_mi
+
+    # 根据sklearn的实现，如果任何Nx < n_neighbors，MI可能直接为0。
+    # 检查是否有类别的样本数小于n_neighbors
+    if np.any(class_counts < n_neighbors) and N > 0:  # 仅当有数据时检查
+        # 这是sklearn中一种可能的处理方式，如果某个类别点太少，则该特征MI为0
+        # 但这需要通过实验验证sklearn的具体行为。
+        # 如果不加此判断，则依赖于上面num_in_class <= n_neighbors时的处理。
+        # 为了更接近sklearn的稳健性，如果某个类别的样本数不足k，则该特征的MI可能是0。
+        # 这个判断放在这里可能更全局。
+        # pass # 暂时不强制设为0，依赖之前的逻辑
+        pass
+
+    return max(0.0, mi)  # 确保非负
+
+
+def reimplemented_mutual_info_classif(X, y, discrete_features='auto',
+                                      n_neighbors=3, copy=True,
+                                      random_state=None):
+    """
+    复现 sklearn.feature_selection.mutual_info_classif 的核心逻辑。
+
+    参数:
+    X : array-like or sparse matrix, shape (n_samples, n_features)
+        特征矩阵。
+    y : array-like, shape (n_samples,)
+        离散的目标向量。
+    discrete_features : 'auto', bool or array-like, default='auto'
+        指明哪些特征是离散的。
+        - 'auto': 稀疏X视为离散，密集X视为连续。
+        - bool: 若为True，所有特征视为离散；若为False，所有特征视为连续。
+        - array-like: 布尔掩码或整数索引数组，指明离散特征。
+    n_neighbors : int, default=3
+        用于连续特征MI估计的k-NN数量。
+    copy : bool, default=True
+        是否复制输入数据。
+    random_state : int, RandomState instance or None, default=None
+        用于控制连续特征抖动的随机数生成。
+
+    返回:
+    mi_scores : array, shape (n_features,)
+        每个特征的估计互信息量。
+    """
+
+    # 1. 输入校验 (简化版，实际sklearn有更全面的校验)
+    if not isinstance(X, np.ndarray):  # 简单处理，sklearn支持更多类型
+        X = np.asarray(X)
+    if not isinstance(y, np.ndarray):
+        y = np.asarray(y)
+
+    if X.ndim == 1:
+        X = X.reshape(-1, 1)
+    if y.ndim != 1:
+        raise ValueError("目标向量y必须是一维的。")
+
+    # 修改这里的校验逻辑：
+    if X.shape[0] != y.shape[0]: # 只比较第一个维度 (样本数)
+        raise ValueError("X和y的样本数必须一致。")
+
+    n_samples, n_features = X.shape
+
+    # 2. 处理 discrete_features 参数
+    if isinstance(discrete_features, str) and discrete_features == 'auto':
+        # 简单假设：如果X是密集型numpy数组，则视为连续 (False)
+        # sklearn的'auto'对稀疏矩阵有不同行为 (issparse(X))
+        # 此处简化为全连续，除非用户明确指定
+        is_discrete_mask = np.zeros(n_features, dtype=bool)
+    elif isinstance(discrete_features, bool):
+        is_discrete_mask = np.full(n_features, discrete_features, dtype=bool)
+    else:  # 假设是布尔掩码或索引数组
+        discrete_features = np.asarray(discrete_features)
+        if discrete_features.dtype == bool:
+            if len(discrete_features) != n_features:
+                raise ValueError("discrete_features布尔掩码长度与特征数不匹配。")
+            is_discrete_mask = discrete_features
+        else:  # 假设是索引
+            is_discrete_mask = np.zeros(n_features, dtype=bool)
+            is_discrete_mask[discrete_features] = True
+
+    # 3. 初始化随机数生成器
+    if isinstance(random_state, int):
+        rng = np.random.default_rng(random_state)
+    elif isinstance(random_state, np.random.Generator):  # 或者 RandomState for older numpy
+        rng = random_state
+    else:  # None or other
+        rng = np.random.default_rng()  # 默认行为
+
+    # 4. 如果 copy=True，复制 X
+    if copy:
+        X_processed = X.copy()
+    else:
+        X_processed = X
+
+    # 5. 对每个特征计算互信息
+    mi_scores = np.zeros(n_features, dtype=float)
+    for feature_idx in range(n_features):
+        feature_vec = X_processed[:, feature_idx]
+
+        # 检查特征是否全为相同值 (零方差)
+        if len(np.unique(feature_vec)) <= 1:
+            mi_scores[feature_idx] = 0.0
+            continue
+
+        if is_discrete_mask[feature_idx]:
+            mi_scores[feature_idx] = _reimplemented_estimate_mi_dd(feature_vec, y)
+        else:
+            mi_scores[feature_idx] = _reimplemented_estimate_mi_cd(feature_vec, y,
+                                                                   n_neighbors, rng)
+    return mi_scores
+
 # 观测值权重444
 def Get_observed_weights(observed_states, hidden_states, params):
     """
@@ -929,7 +1254,19 @@ def Get_observed_weights(observed_states, hidden_states, params):
     mi_weights = {}
     for name, label in state_labels.items():
         y = (hidden_states == label).astype(int)
-        mi = mutual_info_classif(X, y)
+
+        # mi = mutual_info_classif(X, y)
+
+        # 换成自己的函数
+        mi = np.zeros((4))
+        for i in range(4):
+            # print(y.shape)
+            # print(X[:, i].shape,"!!!!")
+            mi[i] = reimplemented_mutual_info_classif(X[:, i], y)
+        #     print("mi[", i, "] = ", mi[i] )
+        # print("mi = ", mi)
+
+
         mi = mi / mi.sum()       # 归一化到和为1
         mi = mi * E              # 放大至和为E
         mi_weights[name] = mi
@@ -1102,9 +1439,20 @@ def initial_ObservedGivenHidden_matrix(params, observed_states):
             new_mus[i, j, e] = mus[oi, oj, e]
             new_sigmas[i, j, e] = sigmas[oi, oj, e]
 
-    # 4. 强制第四簇赋值
-    new_mus[1, 1, :] = 0
-    new_sigmas[1, 1, :] = 0.0001
+    # 4. 第四簇赋值
+    # new_mus[1, 1, :] = 0
+    # new_sigmas[1, 1, :] = 0.0001
+
+    mean_of_mus_00 = new_mus[0, 0, :]
+    mean_of_mus_10 = new_mus[1, 0, :]
+    mean_of_mus_01 = new_mus[0, 1, :]
+    new_mus[1, 1, :] = (mean_of_mus_00 + mean_of_mus_10 + mean_of_mus_01) / 3.0
+
+    var_00 = np.square(new_sigmas[0, 0, :])
+    var_10 = np.square(new_sigmas[1, 0, :])
+    var_01 = np.square(new_sigmas[0, 1, :])
+    mean_var_for_11 = (var_00 + var_10 + var_01) / 3.0
+    new_sigmas[1, 1, :] = np.sqrt(mean_var_for_11)
 
     # 打印结果
     print("\ninitial mus:\n", new_mus)
@@ -1112,116 +1460,54 @@ def initial_ObservedGivenHidden_matrix(params, observed_states):
 
     return new_mus, new_sigmas
 
-# 4.29 四簇聚类，单能见度控制，单（1，1），相关性，绑定
+# 5.26 局高斯coupla 无绑定
 def jumpEM_1(params):
     # 使用 numpy 数组定义最终的转移矩阵（1）
     final_transition_matrices = np.array([
-        [[0.968,  0.1006],
-          [0.032,  0.8994]],
+         [[0.988,  0.0794],
+          [0.012,  0.9206]],
 
-        [[0.7699, 0.1754],
-        [0.2301, 0.8246]]
+         [[0.9962, 0.0612],
+          [0.0038, 0.9388]]
     ])
     # 使用 numpy 数组定义最终的均值矩阵
     final_mus = np.array([
-        [[3.7473, 1.0986, 2.0794, 3.8391],
-         [3.7812, 1.399,  2.1673, 3.6139]],
+        [[3.739,  0.8631, 2.0794, 3.7982],
+          [5.4345, 1.114,  1.9298, 3.2835]],
 
-        [[4.4845, 0.848,  2.1673, 4.4122],
-         [6.9632, 2.1972, 0.0953, 2.6391]]
+        [[4.5564, 0.4868, 1.6463, 4.4149],
+        [0. ,    0. ,    0. ,    0.]]
     ])
     # 使用 numpy 数组定义最终的标准差矩阵
     final_sigmas = np.array([
-        [[0.7345, 0.01,   0.01,  0.4884],
-         [0.9485, 0.5528, 0.3073, 0.5786]],
+        [[0.7597, 0.6704, 0.01,   0.5533],
+          [0.6439, 0.7455, 0.3824, 0.757]],
 
-        [[0.4746, 0.3258, 0.3073, 0.1294],
-         [0.01,   0.01,   0.01,   0.01]]
+        [[0.6635, 0.4814, 0.4217, 0.1654],
+        [0.0001, 0.0001, 0.0001, 0.0001]]
     ])
 
     final_corr = np.array([
-        [[[0.999, - 0.2586, - 0.4028,  0.1674],
-          [-0.2586,  0.999,   0.1196, - 0.5766],
-          [-0.4028, 0.1196,  0.999, - 0.2399],
-          [0.1674, - 0.5766, - 0.2399,  0.999]],
+                              [[[0.999, - 0.1615, - 0.0819,  0.2104],
+                                 [-0.1615,  0.999, - 0.0866, - 0.2686],
+                                 [-0.0819, - 0.0866,  0.999, - 0.0237],
+                                 [0.2104, - 0.2686, - 0.0237,  0.999]],
 
-         [[0.999, - 0.2586, - 0.4028,  0.1674],
-          [-0.2586, 0.999, 0.1196, - 0.5766],
-          [-0.4028,  0.1196,  0.999, - 0.2399],
-          [0.1674, - 0.5766, - 0.2399, 0.999]]],
-
-
-        [[[0.999, - 0.2586, - 0.4028,  0.1674],
-          [-0.2586,  0.999,   0.1196, - 0.5766],
-          [-0.4028,  0.1196,  0.999, - 0.2399],
-          [0.1674, - 0.5766, - 0.2399,  0.999]],
-
-         [[0.999, - 0.2586, - 0.4028,  0.1674],
-          [-0.2586,  0.999,   0.1196, - 0.5766],
-          [-0.4028,  0.1196,   0.999, - 0.2399],
-          [0.1674, - 0.5766, - 0.2399,  0.999]]]
-    ])
-
-    final_pi = 0.99
-    # 创建新参数的副本并更新相应的值
-    new_params = params.copy()
-    new_params['mus'] = final_mus
-    new_params['sigmas'] = final_sigmas
-    new_params['transition_matrices'] = final_transition_matrices
-    new_params['final_pi'] = final_pi
-    new_params['corr_mats'] = final_corr
-
-    # 返回最终的结果
-    return final_transition_matrices, final_mus, final_sigmas, final_pi, new_params
-
-# 标准答案
-def jumpEM_2(params):
-    # 使用 numpy 数组定义最终的转移矩阵（1）
-    final_transition_matrices = np.array([
-        [[0.9867, 0.08],
-          [0.0133, 0.92]],
-
-        [[0.996,  0.0803],
-        [0.004,  0.9197]]
-    ])
-    # 使用 numpy 数组定义最终的均值矩阵
-    final_mus = np.array([
-        [[3.74,   0.878,  2.0794, 3.7772],
-          [5.5595, 1.095,  1.7352, 3.367]],
-
-        [[4.5688, 0.453,  1.7352, 4.4192],
-        [0.,     0.,     0.,     0.]]
-    ])
-    # 使用 numpy 数组定义最终的标准差矩阵
-    final_sigmas = np.array([
-        [[0.7637, 0.6711, 0.01,   0.5646],
-          [0.6068, 0.738,  0.4273, 0.7167]],
-
-        [[0.6425, 0.4725, 0.4273, 0.1577],
-        [0.01,   0.01,   0.01,   0.01]]
-    ])
-
-    final_corr = np.array([
-    [[[1., - 0.0768, - 0.4164,  0.4652],
-       [-0.0768,  1.,      0.0703, - 0.1427],
-      [-0.4164,  0.0703,  1.,      0.026],
-     [0.4652, - 0.1427,  0.026,   1.]],
-
-    [[1., - 0.179, - 0.4427,  0.1579],
-     [-0.179,   1.,      0.109, - 0.2384],
-    [-0.4427,    0.109,    1., - 0.2866],
-    [0.1579, - 0.2384, - 0.2866,  1.]]],
+                                [[0.999, - 0.1615, - 0.0819,  0.2104],
+                                 [-0.1615,    0.999, - 0.0866, - 0.2686],
+                                 [-0.0819, - 0.0866,  0.999, - 0.0237],
+                                 [0.2104, - 0.2686, - 0.0237,    0.999]]],
 
 
-    [[[1.,      0.,      0.,      0.],
-      [0.,      1.,      0.,      0.],
-     [0.,      0.,      1.,      0.],
-    [0.,    0.,    0.,    1.]],
+                              [[[0.999, - 0.1615, - 0.0819,  0.2104],
+                                [-0.1615,  0.999, - 0.0866, - 0.2686],
+                                [-0.0819, - 0.0866,  0.999, - 0.0237],
+                                [0.2104, - 0.2686, - 0.0237,    0.999]],
 
-    [[1.,      0.,      0.,      0.],
-     [0.,      1.,      0.,      0.],
-    [0.,    0.,    1.,    0.],
-    [0.,      0.,      0.,      1.]]]
+                               [[0.999, - 0.1615, - 0.0819,  0.2104],
+                                [-0.1615,  0.999, - 0.0866, - 0.2686],
+                                [-0.0819, - 0.0866,    0.999, - 0.0237],
+                                [0.2104, - 0.2686, - 0.0237,  0.999]]]
     ])
 
     final_pi = 0.99
@@ -1494,17 +1780,17 @@ def plot_f1_and_auc(hidden_states, most_likely_hidden_state):
             elif hidden_states[i] == label and predicted_states[i] != label:
                 TP_FP_TN_FN[idx, 3] += 1  # FN
 
-    print("Custom TP/FP/TN/FN for each label:")
+    # print("Custom TP/FP/TN/FN for each label:")
     print(TP_FP_TN_FN)
 
     # Custom TPR, FAR, SI
     TPR = TP_FP_TN_FN[:, 0] / (TP_FP_TN_FN[:, 0] + TP_FP_TN_FN[:, 3])
     FAR = TP_FP_TN_FN[:, 1] / (TP_FP_TN_FN[:, 1] + TP_FP_TN_FN[:, 2])
     SI = TPR - FAR
-    print("Custom Metrics:")
-    print("True Positive Rate (TPR):", TPR)
-    print("False Alarm Rate (FAR):", FAR)
-    print("Success Index (SI):", SI)
+    # print("Custom Metrics:")
+    # print("True Positive Rate (TPR):", TPR)
+    # print("False Alarm Rate (FAR):", FAR)
+    # print("Success Index (SI):", SI)
 
     # Calculate F1 scores for each label
     f1_scores = {}
@@ -1898,9 +2184,9 @@ def initial_corr_mats(params,
 start_time = time.time()
 
 # 原始数据地址与保存文件地址
-location = 'sample_data.xls'
-file_path = 'sample_data.xlsx'
-histr_location = 'sample_history.xls'
+location = 'D:/Desktop/桌面旧/合并数据删1.xls'
+file_path = 'D:/Desktop/桌面旧/合并数据删1.xlsx'
+histr_location = 'D:/Desktop/桌面旧/历史数据1.xls'
 
 # 读取数据与历史数据
 (observed_states, hidden_states,
@@ -1908,7 +2194,7 @@ histr_location = 'sample_history.xls'
 
 (histr_observed_states, histr_hidden_states, histr_encoded_hidden_states,
                     histr_months, histr_years) = Get_observed_and_hidden_state(histr_location)
-print("\nmonths:", months)
+# print("\nmonths:", months)
 print('\nobserved_states =\n', observed_states)
 print('\nshape of observed_states = ', observed_states.shape)
 print("\nhidden_states = \n", hidden_states)
@@ -1919,7 +2205,7 @@ n_steps = len(observed_states[0])  # 时间步
 E = observed_states.shape[0]  # 观测链个数
 M = 2  # 隐藏链个数
 K = 2  # 隐藏链范围
-precision = 2  # 迭代终止条件
+precision = 0.1  # 迭代终止条件
 
 # 字典便于传递和更新参数
 params = {
@@ -1933,7 +2219,7 @@ params = {
     'observed_weights': np.ones((K,) * M + (E,)),  # 观测链权重224
     'zero_inflation_pi': 0.99, # 零膨胀概率
     'corr_mats': np.tile(np.eye(E), (K, K, 1, 1)).reshape(K, K, E, E), # 相关矩阵（单位矩阵）
-    'force_corr_identity': False # 是否禁用相关性
+    'corr_mode': 1 # 0:无corr, 1:全局高斯coupla, 2:高斯coupla, 3:全局联合正态, 4:联合正态
 }
 
 # 参数初始化
@@ -1952,17 +2238,6 @@ params['mus'], params['sigmas'] = initial_ObservedGivenHidden_matrix(params, obs
 # params['corr_mats'] = initial_corr_mats(params, observed_states, encoded_hidden_states)
 print("\ninitial corr:\n", params['corr_mats'])
 
-# params['mus'] = np.array([[[2.8276,   0.3483,   1.9637,   3.643],
-#   [4.9088,   1.4853,   1.463,    2.8348]],
-#
-# [[3.9525, - 13.8155,   0.9672,   4.3288],
-# [0.,0.,0.,0.]]])
-# params['sigmas'] =  np.array([[[0.3794, 0.3466, 0.1163, 0.2063],
-#   [0.4482, 0.3875, 0.14,   0.3234]],
-#
-#  [[0.2885, 0.01,   0.2055, 0.184 ],
-#   [0.0001, 0.0001, 0.0001, 0.0001]]])
-
 # 创建实体
 F = FullDiscreteFactorialHMM(params=params, n_steps=n_steps, calculate_on_init=True)
 
@@ -1971,7 +2246,7 @@ F = FullDiscreteFactorialHMM(params=params, n_steps=n_steps, calculate_on_init=T
 final_transition_matrices, final_mus, final_sigmas, new_params = F.EM(
     observed_states, likelihood_precision = precision, verbose=True, print_every=1)
 
-# 跳过EM算法
+# # 跳过EM算法
 # final_transition_matrices, final_mus, final_sigmas, final_pi, new_params = jumpEM_1(params)
 
 print('\nfinal_transition_matrices = \n', final_transition_matrices)
@@ -1982,6 +2257,22 @@ print('\nfinal corr\n', new_params['corr_mats'])
 # 互信息法计算观测链权重 (将params里（4）的权重（1，1，1，1）变成了new_params里的（4，4）维）
 sigle_weights, new_params['observed_weights'] = Get_observed_weights(histr_observed_states, histr_hidden_states, params)
 print("weights: Clear, Haze, Smog, Smog and Haze =\n", new_params['observed_weights'])
+
+# # 标准库
+# new_params['observed_weights'] = np.array(
+#     [[[0.7454, 0.1328, 2.5001, 0.6218],
+#       [1.7542, 0.4349, 1.2035, 0.6075]],
+#
+#      [[0.7081, 0.1292, 2.4966, 0.6662],
+#       [1.,     1.,     1.,     1.    ]]])
+# # 自己的函数
+# new_params['observed_weights'] = np.array(
+#     [[[0.9328, 0.7754, 1.3829, 0.9089],
+#       [1.014, 0.992, 0.9988, 0.9952]],
+#
+#      [[0.9289, 0.7866, 1.3676, 0.9169],
+#       [1., 1., 1., 1., ]]]
+# )
 
 # 设置全局权重
 # transition_emission_ratio
@@ -1997,8 +2288,8 @@ _ = result_verification(hidden_states, most_likely_hidden_state)
 # 隐藏状态区分结果画图(条带)
 hidden_state_differentiation_chart(hidden_states, most_likely_hidden_state)
 
-# 事件区分图（月份条形图）
-hidden_state_monthly_accuracy_chart(hidden_states, most_likely_hidden_state, months, years)
+# # 事件区分图（月份条形图）
+# hidden_state_monthly_accuracy_chart(hidden_states, most_likely_hidden_state, months, years)
 
 # F1 AUC画图
 f1_scores = []
