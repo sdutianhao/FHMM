@@ -1,12 +1,7 @@
-#5.6最终 无corr，退化成好结果
 import functools
-
-
 import itertools
 import operator
 import numpy as np
-# numpy=1.21.6，1.26.1不行
-# pandas=2.0.0，2,1,4不行
 import scipy
 import scipy.stats as stats
 from scipy.stats import kstest, norm, pearsonr
@@ -18,10 +13,10 @@ import time
 import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap
 from matplotlib.patches import Patch, FancyArrowPatch
-import numpy as np
 from scipy.special import digamma
 from sklearn.neighbors import NearestNeighbors  # 用于k-NN搜索的参考，但以下实现中手动计算
 from collections import Counter
+
 # 设置全局字体
 plt.rcParams['font.family'] = 'Times New Roman'
 # 设置全局字号
