@@ -12,11 +12,6 @@ Repository contents
 
 ---
 
-## Input data format
-
-Ensure that input files follow the column order assumed by the scripts. If you introduce new files, keep the same column order as in the distributed samples.
-
----
 
 ## Requirements
 
