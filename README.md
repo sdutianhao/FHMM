@@ -22,9 +22,6 @@ Repository contents
 | scikit-learn | 0.24.2 |
 | Others | pandas, scipy, matplotlib |
 
-Installation
-# recommended in a virtual environment
-pip install -r requirements.txt
 
 ---
 
