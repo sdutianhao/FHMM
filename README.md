@@ -1,28 +1,88 @@
 # Joint Haze-and-Dust Classification via FHMM
 
-This repository contains a **Python implementation** together with a **sample dataset** that demonstrates how to use a Factorial Hidden Markov Model (FHMM) to jointly classify haze and dust events from multi-channel observational sequences.
+This repository provides Python implementations and a sample dataset to demonstrate how a Factorial Hidden Markov Model (FHMM) jointly classifies haze and dust events from multi-channel observational sequences.
 
-- `run_fhmm.py`  Main script: data loading → parameter initialization → EM iterations → Viterbi decoding → result output  
-- `sample_data.xls`, `sample_history.xls`  Sample data: four observation channels (PM10, wind speed, visibility, relative humidity) with timestamps  
-  > These two datasets are real-world measurements collected from **Beijing Capital International Airport** between **2022 and 2024**, including hourly meteorological and air quality data.
-- `Output.txt`  
-  Sample output log from running the FHMM model, showcasing how the most probable hidden state is inferred over time.  
-  > Output includes emission probabilities, transition scores, and selected time steps (e.g., `t = 3`, `t = 8475`); intermediate steps are omitted for brevity.
+Repository contents
+- Model scripts: M0, M1a, M1b, M2a, M2b, M2c, M2d
+- Sample data files: sample_data.xls, sample_history.xls  
+  These two datasets are real-world measurements collected at Beijing Capital International Airport between 2022 and 2024, including hourly meteorological and air-quality observations.
+- Stored posterior probability files: M0_gammas.npy, M1_gammas.npy, M2_gammas.npy
+- 3D sampling points for M2d plotting: data_of_3d_macro_micro_F1.txt
 
 
-> ⚠️  If you replace or add data files, ensure that the column order matches the script logic.
+---
+
+## Input data format
+
+Ensure that input files follow the column order assumed by the scripts. If you introduce new files, keep the same column order as in the distributed samples.
 
 ---
 
 ## Requirements
 
-| Dependency     | Version |
-| -------------- | ------- |
-| Python         | **3.9.19** |
-| NumPy          | **1.21.6** |
-| scikit-learn   | **0.24.2** |
-| Others (auto-installed) | pandas, scipy, matplotlib, etc. |
+| Dependency | Version |
+| --- | --- |
+| Python | 3.9.19 |
+| NumPy | 1.21.6 |
+| scikit-learn | 0.24.2 |
+| Others | pandas, scipy, matplotlib |
 
-```bash
-# It is recommended to install dependencies in a virtual environment
+Installation
+# recommended in a virtual environment
 pip install -r requirements.txt
+
+---
+
+## Models
+
+The repository includes seven model configurations. MI denotes mutual information. Differences are summarised below.
+
+| Code | Correlation structure | Obs. weight w | Global opt. | Key description |
+| --- | --- | --- | --- | --- |
+| M0  | None (independence) | None | No | Baseline FHMM that ignores inter-dimensional correlation. |
+| M1a | Joint log-normal | None | No | Uses a covariance matrix to capture linear correlation. |
+| M1b | Joint log-normal | Normalised MI | No | Adds mutual-information weights on top of M1a. |
+| M2a | Gaussian copula | None | No | Uses a copula to capture non-linear correlation. |
+| M2b | Gaussian copula | Raw MI | No | Adds unnormalised MI weights on top of M2a. |
+| M2c | Gaussian copula | Normalised MI | No | Adds normalised MI weights on top of M2a. |
+| M2d | Gaussian copula | Normalised MI | Yes | Final optimised model that jointly tunes Sigma*w and the global weight v. M2d also provides a 3D search over observation-weight w and global weight v to maximise F1-score; because this requires many Viterbi runs, the script defaults to reading precomputed points and plotting them. Download data_of_3d_macro_micro_F1.txt and place it in the same directory as M2d.py. |
+
+---
+
+## Runtime and reproducibility
+
+- EM iterations are computationally expensive on a laptop, typically 3–6 hours.
+- Training is deterministic. With the same inputs and settings, repeated runs produce identical results.
+- All scripts default to skipping EM and loading precomputed EM results for subsequent steps.
+- To run the full EM procedure, comment out lines 3308–3310 and uncomment line 3313 in the selected model script.
+
+ROC curves when skipping EM
+- ROC plotting requires posterior probabilities (gammas) from EM. If you skip EM, download the corresponding stored gamma file:
+  - M0_gammas.npy for M0
+  - M1_gammas.npy for M1a and M1b
+  - M2_gammas.npy for M2a, M2b, M2c, and M2d
+
+---
+
+## Quick start
+
+- Choose a model code from the table above.
+  
+- Ensure the required support files are present.
+  
+- - M0 required files:  
+    sample_data.xls, sample_history.xls, M0_gammas.npy
+
+- - M1a, M1b required files:  
+    sample_data.xls, sample_history.xls, M1_gammas.npy
+
+- - M2a, M2b, M2c required files:  
+    sample_data.xls, sample_history.xls, M2_gammas.npy
+
+- - M2d required files:  
+    sample_data.xls, sample_history.xls, M2_gammas.npy, data_of_3d_macro_micro_F1.txt
+  
+- Run
+
+
+
