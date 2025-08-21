@@ -37,7 +37,7 @@ The repository includes seven model configurations. MI denotes mutual informatio
 | M2a | Gaussian copula | None | No | Uses a copula to capture non-linear correlation. |
 | M2b | Gaussian copula | Raw MI | No | Adds unnormalised MI weights on top of M2a. |
 | M2c | Gaussian copula | Normalised MI | No | Adds normalised MI weights on top of M2a. |
-| M2d | Gaussian copula | Normalised MI | Yes | Final optimised model that jointly tunes Sigma*w and the global weight v. M2d also provides a 3D search over observation-weight w and global weight v to maximise F1-score; because this requires many Viterbi runs, the script defaults to reading precomputed points and plotting them. Download data_of_3d_macro_micro_F1.txt and place it in the same directory as M2d.py. |
+| M2d | Gaussian copula | Normalised MI | Yes | Final optimised model: jointly tunes Σw and the global weight v |
 
 ---
 
