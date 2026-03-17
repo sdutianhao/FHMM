@@ -1,4 +1,5 @@
 # Integrated FHMM haze-dust classifier.
+import argparse
 import functools
 import itertools
 import operator
@@ -38,6 +39,23 @@ def resolve_repo_file(filename, required=True):
     if required and not path.exists():
         raise FileNotFoundError(f"Required file not found: {path}")
     return str(path)
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Run the final FHMM haze-dust classification workflow."
+    )
+    parser.add_argument(
+        "--run-em",
+        action="store_true",
+        help="Run the full EM optimization instead of loading the stored final parameter preset.",
+    )
+    parser.add_argument(
+        "--gamma-file",
+        default="M2_gammas.npy",
+        help="Posterior probability file used for ROC plotting, or the output file when --run-em is enabled.",
+    )
+    return parser.parse_args()
 
 
 class Indices(object):
@@ -3976,6 +3994,7 @@ def build_train_set_by_ratio(histr_obs: np.ndarray,
 
 
 # Script entry
+args = parse_args()
 start_time = time.time()
 
 location = resolve_repo_file('Data.xls')
@@ -4022,8 +4041,24 @@ print('\nzero_inflation_pi:\n', params['zero_inflation_pi'])
 params['mus'], params['sigmas'] = initial_ObservedGivenHidden_matrix(params, observed_states.T)
 print("\ninitial corr:\n", params['corr_mats'])
 
-# Use the stored final parameter set from the integrated M2d configuration.
-final_transition_matrices, final_mus, final_sigmas, _, new_params = jumpEM_710C(params)
+if args.run_em:
+    print("\n[Mode] Running full EM optimization.")
+    F = FullDiscreteFactorialHMM(params=params, n_steps=n_steps, calculate_on_init=True)
+    final_transition_matrices, final_mus, final_sigmas, new_params, gammas = F.EM(
+        observed_states,
+        likelihood_precision=1,
+        verbose=True,
+        print_every=1,
+    )
+    gamma_path = resolve_repo_file(args.gamma_file, required=False)
+    np.save(gamma_path, gammas)
+    print(f"[Mode] Saved EM posterior probabilities -> {gamma_path}")
+else:
+    print("\n[Mode] Skipping EM and loading the stored final M2d preset.")
+    final_transition_matrices, final_mus, final_sigmas, _, new_params = jumpEM_710C(params)
+    gamma_path = resolve_repo_file(args.gamma_file)
+    gammas = np.load(gamma_path)
+    print(f"[Mode] Loaded posterior probabilities -> {gamma_path}")
 
 print('\nfinal_transition_matrices = \n', final_transition_matrices)
 print('\nfinal mus = \n', new_params['mus'])
@@ -4053,7 +4088,6 @@ most_likely_hidden_state, back_pointers, lls = H.Viterbi(
     hidden_states,
 )
 
-gammas = np.load(resolve_repo_file('M2_gammas.npy'))
 print('\nfinal gammas\n', gammas)
 
 compute_and_plot_multiclass_ROC(gammas, hidden_states)
