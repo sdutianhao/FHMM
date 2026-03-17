@@ -1,8 +1,8 @@
 # FHMM Haze-Dust Classifier
 
-This repository contains one main program: `M2d.py`.
+This repository contains one main program: `fhmm_haze_dust.py`.
 
-`M2d.py` is the final integrated version of the project. It runs the FHMM-based haze-dust classification pipeline, including weighting, evaluation, plotting, and the final 3D performance analysis used in the paper.
+`fhmm_haze_dust.py` is the final integrated version of the project. It runs the FHMM-based haze-dust classification pipeline, including weighting, evaluation, plotting, and the final 3D performance analysis used in the paper.
 
 ## Run
 
@@ -15,14 +15,14 @@ python -m pip install -r requirements.txt
 Run the main program:
 
 ```bash
-python M2d.py
+python fhmm_haze_dust.py
 ```
 
 ## Required Files
 
 Keep these files in the repository root:
 
-- `M2d.py`
+- `fhmm_haze_dust.py`
 - `Data.xls`
 - `Data_history.xls`
 - `M2_gammas.npy`
@@ -31,7 +31,7 @@ Keep these files in the repository root:
 
 ## What It Produces
 
-`M2d.py` includes the code for:
+`fhmm_haze_dust.py` includes the code for:
 
 - FHMM inference
 - ROC and F1 evaluation
