@@ -19,6 +19,7 @@ from sklearn.neighbors import NearestNeighbors  # 用于k-NN搜索的参考，�
 from collections import Counter
 from sklearn.metrics import roc_curve, auc, roc_auc_score
 from sklearn.preprocessing import label_binarize
+from repo_paths import resolve_repo_file
 
 # 设置全局字体
 plt.rcParams['font.family'] = 'Times New Roman'
@@ -3242,9 +3243,9 @@ def build_train_set_by_ratio(histr_obs: np.ndarray,
 start_time = time.time()
 
 # 原始数据地址与保存文件地址
-location = 'Data.xls'
-file_path = 'Data.xlsx'
-histr_location = 'Data_history.xls'
+location = resolve_repo_file('Data.xls')
+file_path = resolve_repo_file('Data.xlsx', required=False)
+histr_location = resolve_repo_file('Data_history.xls')
 
 # 读取数据与历史数据
 (observed_states, hidden_states,
@@ -3378,7 +3379,7 @@ most_likely_hidden_state, back_pointers, lls = H.Viterbi(observed_states, new_pa
 
 # 计算ROC
 
-gammas = np.load('M2_gammas.npy')
+gammas = np.load(resolve_repo_file('M1_gammas.npy'))
 print('\nfinal gammas\n', gammas)
 
 # # 1. 三个状态各自的子图，如下：
