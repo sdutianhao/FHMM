@@ -45,9 +45,13 @@ MODEL_SPECS = {
 
 
 def list_models() -> str:
-    lines = ["Available models:"]
+    lines = [
+        "Primary entry: M2d",
+        "Historical comparison scripts:",
+    ]
     for model_code, spec in MODEL_SPECS.items():
-        lines.append(f"  {model_code:3}  {spec['description']}")
+        prefix = "* " if model_code == "M2d" else "  "
+        lines.append(f"{prefix}{model_code:3}  {spec['description']}")
     return "\n".join(lines)
 
 
@@ -67,9 +71,15 @@ def build_command(model_code: str, python_executable: str) -> list[str]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Run one of the FHMM model scripts from a consistent repository root."
+        description="Run the integrated FHMM project entry (M2d by default) from a consistent repository root."
     )
-    parser.add_argument("model", nargs="?", choices=sorted(MODEL_SPECS), help="Model code to run.")
+    parser.add_argument(
+        "model",
+        nargs="?",
+        choices=sorted(MODEL_SPECS),
+        default="M2d",
+        help="Model code to run. Defaults to M2d, the integrated final script.",
+    )
     parser.add_argument(
         "--python",
         dest="python_executable",
@@ -93,12 +103,12 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    if args.list_models or not args.model:
+    if args.list_models:
         print(list_models())
-        if not args.model:
-            print("\nExample:")
-            print("  python run_model.py M2c")
-            print("  python run_model.py M2d --check-only")
+        print("\nExamples:")
+        print("  python run_model.py")
+        print("  python run_model.py M2d --check-only")
+        print("  python run_model.py M0")
         return 0
 
     model_code = args.model
@@ -114,6 +124,10 @@ def main() -> int:
     print(f"[FHMM] Repository root: {REPO_ROOT}")
     print(f"[FHMM] Model: {model_code}")
     print(f"[FHMM] Script: {MODEL_SPECS[model_code]['script']}")
+    if model_code == "M2d":
+        print("[FHMM] This is the integrated final project entry.")
+    else:
+        print("[FHMM] This is a historical comparison / ablation script.")
     print("[FHMM] Required assets:")
     for asset in MODEL_SPECS[model_code]["assets"]:
         print(f"  - {asset}")
