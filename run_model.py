@@ -46,8 +46,8 @@ MODEL_SPECS = {
 
 def list_models() -> str:
     lines = [
-        "Primary entry: M2d",
-        "Historical comparison scripts:",
+        "Main script: M2d.py",
+        "Other scripts kept for paper comparison:",
     ]
     for model_code, spec in MODEL_SPECS.items():
         prefix = "* " if model_code == "M2d" else "  "
@@ -71,14 +71,14 @@ def build_command(model_code: str, python_executable: str) -> list[str]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Run the integrated FHMM project entry (M2d by default) from a consistent repository root."
+        description="Run the FHMM project. By default this launches the final integrated script, M2d.py."
     )
     parser.add_argument(
         "model",
         nargs="?",
         choices=sorted(MODEL_SPECS),
         default="M2d",
-        help="Model code to run. Defaults to M2d, the integrated final script.",
+        help="Model code to run. Defaults to M2d.py, the final integrated script.",
     )
     parser.add_argument(
         "--python",
@@ -89,12 +89,12 @@ def main() -> int:
     parser.add_argument(
         "--list-models",
         action="store_true",
-        help="Show the available model codes and exit.",
+        help="Show the main script and the comparison scripts, then exit.",
     )
     parser.add_argument(
         "--check-only",
         action="store_true",
-        help="Validate that the required assets for the chosen model exist, then exit.",
+        help="Check that the required files for the chosen script exist, then exit.",
     )
     parser.add_argument(
         "--dry-run",
@@ -125,10 +125,10 @@ def main() -> int:
     print(f"[FHMM] Model: {model_code}")
     print(f"[FHMM] Script: {MODEL_SPECS[model_code]['script']}")
     if model_code == "M2d":
-        print("[FHMM] This is the integrated final project entry.")
+        print("[FHMM] This is the main integrated script.")
     else:
-        print("[FHMM] This is a historical comparison / ablation script.")
-    print("[FHMM] Required assets:")
+        print("[FHMM] This is a comparison / ablation script.")
+    print("[FHMM] Required files:")
     for asset in MODEL_SPECS[model_code]["assets"]:
         print(f"  - {asset}")
     print(f"[FHMM] Command: {' '.join(command)}")
