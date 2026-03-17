@@ -1,4 +1,4 @@
-# copula 19 vtb 去掉（1，1），sigma 0.1
+# Integrated FHMM haze-dust classifier.
 import functools
 import itertools
 import operator
@@ -16,16 +16,14 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap
 from matplotlib.patches import Patch, FancyArrowPatch
 from scipy.special import digamma
-from sklearn.neighbors import NearestNeighbors  # 用于k-NN搜索的参考，但以下实现中手动计算
+from sklearn.neighbors import NearestNeighbors
 from collections import Counter
 from sklearn.metrics import roc_curve, auc, roc_auc_score
 from sklearn.preprocessing import label_binarize
 
-# 设置全局字体
+# Plot defaults
 plt.rcParams['font.family'] = 'Times New Roman'
-# 设置全局字号
 plt.rcParams['font.size'] = 18
-# 删去警告
 import warnings
 
 warnings.filterwarnings("ignore")
@@ -42,7 +40,6 @@ def resolve_repo_file(filename, required=True):
     return str(path)
 
 
-# 构造类
 class Indices(object):
     def __init__(self, fields_and_sizes):
         self.field_sizes = []
@@ -62,7 +59,7 @@ class FactorialHMM(object):
 
         self.observed_type = float  # unless otherwise specified downstream
 
-        # TOOD: assert existence of self.hidden_indices
+        # TODO: assert existence of self.hidden_indices
         self.n_hidden_states = len(self.hidden_indices)
         self.n_hidden_state_space = functools.reduce(operator.mul, self.hidden_indices.field_sizes)
         self.all_hidden_states = np.array(
@@ -82,12 +79,12 @@ class FactorialHMM(object):
         self.initial_hidden_state_tensor = [np.ones(size) for size in self.hidden_indices.field_sizes]
 
         if calculate_on_init:
-            # 设置transition_matrices_tensor
+            # Populate the transition tensor for each step.
             for n in range(self.n_steps - 1):
                 for field in range(self.n_hidden_states):
                     self.transition_matrices_tensor[n][field] = params['transition_matrices'][field, :, :]
 
-            # 设置initial_hidden_state_tensor
+            # Populate the initial hidden-state tensor.
             for field in range(self.n_hidden_states):
                 self.initial_hidden_state_tensor[field] = params['initial_hidden_state'][field, :]
 
@@ -3978,260 +3975,92 @@ def build_train_set_by_ratio(histr_obs: np.ndarray,
     return X_train, y_train
 
 
-# # --------------------主函数---------------------------------------------------------------------------------
-# # -----------------------------------------------------------------------------------------------------
-# # --------------------数据读取---------------------------------------------------------------------------------
-
-# 计时
+# Script entry
 start_time = time.time()
 
-# 原始数据地址与保存文件地址
 location = resolve_repo_file('Data.xls')
 histr_location = resolve_repo_file('Data_history.xls')
 
-# 读取数据与历史数据
 (observed_states, hidden_states,
-                    encoded_hidden_states, months, years) = Get_observed_and_hidden_state(location)
+ encoded_hidden_states, months, years) = Get_observed_and_hidden_state(location)
 
 (histr_observed_states, histr_hidden_states, histr_encoded_hidden_states,
-                    histr_months, histr_years) = Get_observed_and_hidden_state(histr_location)
-# print("\nmonths:", months)
+ histr_months, histr_years) = Get_observed_and_hidden_state(histr_location)
+
 print('\nobserved_states =\n', observed_states)
 print('\nshape of observed_states = ', observed_states.shape)
 print("\nhidden_states = \n", hidden_states)
 print("\nshape of hidden_states", hidden_states.shape)
 
-# --------------------参数初始化---------------------------------------------------------------------------------
+n_steps = len(observed_states[0])
+E = observed_states.shape[0]
+M = 2
+K = 2
 
-# 设定参数
-n_steps = len(observed_states[0])  # 时间步
-E = observed_states.shape[0]  # 观测链个数
-M = 2  # 隐藏链个数
-K = 2  # 隐藏链范围
-precision = 1  # 迭代终止条件
-
-# 字典便于传递和更新参数
 params = {
-    'hidden_alphabet_size': K,  # 隐藏值范围
-    'n_hidden_chains': M,  # 隐藏链个数
-    'n_observed_chains': E,  # 观测链个数
-    'initial_hidden_state': np.zeros((M, K)),  # 初始隐藏状态
-    'transition_matrices': np.zeros((M, K, K)),  # 转移矩阵
-    'mus': np.zeros((K,) * M + (E,)),  # 均值224
-    'sigmas': np.zeros((K,) * M + (E,)),  # 标准差224
-    'observed_weights': np.ones((K,) * M + (E,)),  # 观测链权重224
-    'zero_inflation_pi': 0.99, # 零膨胀概率
-    'corr_mats': np.tile(np.eye(E), (K, K, 1, 1)).reshape(K, K, E, E), # 相关矩阵（单位矩阵）
-    'corr_mode': 1 # 0:无corr, 1:全局高斯coupla, 2:高斯coupla, 3:全局联合正态, 4:联合正态
+    'hidden_alphabet_size': K,
+    'n_hidden_chains': M,
+    'n_observed_chains': E,
+    'initial_hidden_state': np.zeros((M, K)),
+    'transition_matrices': np.zeros((M, K, K)),
+    'mus': np.zeros((K,) * M + (E,)),
+    'sigmas': np.zeros((K,) * M + (E,)),
+    'observed_weights': np.ones((K,) * M + (E,)),
+    'zero_inflation_pi': 0.99,
+    'corr_mats': np.tile(np.eye(E), (K, K, 1, 1)).reshape(K, K, E, E),
+    'corr_mode': 1,
 }
 
-# 参数初始化
-# 设置初始隐藏值
 params['initial_hidden_state'][0, :] = [548 / 8476] * K
 params['initial_hidden_state'][1, :] = [76 / 8476] * K
-# 设置初始转移矩阵
-transition_matrix_real = initial_transition_matrix(params, histr_hidden_states)
-params['transition_matrices'] = transition_matrix_real
+params['transition_matrices'] = initial_transition_matrix(params, histr_hidden_states)
+
 print('\nshape of transition_matrices:', params['transition_matrices'].shape)
 print('\ninitial transition_matrices:\n', params['transition_matrices'])
 print('\nzero_inflation_pi:\n', params['zero_inflation_pi'])
 
-# 设置初始mus，sigmas，corr
 params['mus'], params['sigmas'] = initial_ObservedGivenHidden_matrix(params, observed_states.T)
-# params['corr_mats'] = initial_corr_mats(params, observed_states, encoded_hidden_states)
 print("\ninitial corr:\n", params['corr_mats'])
 
-# --------------------EM---------------------------------------------------------------------------------
-
-# 创建实体
-F = FullDiscreteFactorialHMM(params=params, n_steps=n_steps, calculate_on_init=True)
-
-# # 运行EM算法
-# # 对数似然度 Log Likelihood = log(P(观测数据 | 模型参数))
-# final_transition_matrices, final_mus, final_sigmas, new_params, gammas = F.EM(
-#     observed_states, likelihood_precision = precision, verbose=True, print_every=1)
-# np.save('M2_gammas.npy', gammas)
-
-# 跳过EM算法
-final_transition_matrices, final_mus, final_sigmas, final_pi, new_params = jumpEM_710C(params)
+# Use the stored final parameter set from the integrated M2d configuration.
+final_transition_matrices, final_mus, final_sigmas, _, new_params = jumpEM_710C(params)
 
 print('\nfinal_transition_matrices = \n', final_transition_matrices)
 print('\nfinal mus = \n', new_params['mus'])
 print('\nfinal sigmas = \n', new_params['sigmas'])
 print('\nfinal corr\n', new_params['corr_mats'])
 
-
-# --------------------权重---------------------------------------------------------------------------------
-
-# # 互信息法计算观测链权重 (将params里（4）的权重（1，1，1，1）变成了new_params里的（4，4）维）
-# sigle_weights, new_params['observed_weights'] = Get_observed_weights(histr_observed_states, histr_hidden_states, params)
-# print("weights: Clear, Haze, Smog, Smog and Haze =\n", new_params['observed_weights'])
-#
-# # 标准库
-# new_params['observed_weights'] = np.array(
-#     [[[0.0831, 0.0182, 0.2794, 0.0689],
-#       [0.0125, 0.003,  0.0077, 0.0046]],
-#
-#      [[0.0765, 0.0146, 0.2708, 0.0723],
-#       [1.    , 1.    , 1.    , 1.    ]]]
-# )
-#
-# 自己的函数
-new_params['observed_weights'] = np.array(
+base_observed_weights = np.array(
     [[[0.5244, 0.4416, 0.7771, 0.5137],
       [0.5122, 0.5005, 0.5052, 0.5028]],
-
-     [[0.5232, 0.445 , 0.7662, 0.5137],
-      [1.    , 1.    , 1.    , 1.    ]]]
+     [[0.5232, 0.4450, 0.7662, 0.5137],
+      [1.0000, 1.0000, 1.0000, 1.0000]]]
 )
-#
-# # # 权重取倒数
-# # new_params['observed_weights'] = 1.0 / new_params['observed_weights']
-#
-# 权重归一化
-mi = np.zeros((4))
+weight_scale = 1.1
+
 for i in range(2):
     for j in range(2):
-        mi = new_params['observed_weights'][i, j]
-        mi = mi / mi.sum()       # 归一化到和为1
-        # mi = mi * E              # 放大至和为E
+        mi = base_observed_weights[i, j]
+        new_params['observed_weights'][i, j] = (mi / mi.sum()) * weight_scale
 
-        # mi = mi * 1.79              # 3 0.7028 0.9195
-        # mi = mi * 1.33              # 1 0.7734 0.9306
-        # mi = mi * 1.31              # 2 0.7734 0.9306
-        # mi = mi * 1.07              # 4 0.7800 0.9374
-        # mi = mi * 0.94              # 5 0.7934 0.9395
+global_weight = 16.47
 
-        # mi = mi * 0.96              # 5 0.7994 0.9438
-        # mi = mi * 1.05              # 5 0.8016 0.9490
-        # mi = mi * 1                   # 5 0.8030 0.9461
-        mi = mi * 1.1               # 5 0.8047 0.9508
-        # mi = mi * 2.2               # 5 0.8047 0.9508
-
-        new_params['observed_weights'][i, j] = mi
-
-# 设置全局权重
-# transition_emission_ratio
-global_weight = 1
-
-# global_weight = 4.84
-# global_weight = 5.84
-# global_weight = 5.78
-# global_weight = 9.33
-# global_weight = 11.66
-
-# global_weight = 12
-# global_weight = 14.9
-# global_weight = 12.78
-global_weight = 16.47 #16.58
-# global_weight = 10.931034
-
-
-# --------------------Viterbi---------------------------------------------------------------------------------
-
-# 创建实体
 H = FullDiscreteFactorialHMM(params=new_params, n_steps=n_steps, calculate_on_init=True)
-# 运行Viterbi算法（使用均值权重）
-most_likely_hidden_state, back_pointers, lls = H.Viterbi(observed_states, new_params['observed_weights'], global_weight, hidden_states)
-
-# --------------------ROC---------------------------------------------------------------------------------
-
-# 计算ROC
+most_likely_hidden_state, back_pointers, lls = H.Viterbi(
+    observed_states,
+    new_params['observed_weights'],
+    global_weight,
+    hidden_states,
+)
 
 gammas = np.load(resolve_repo_file('M2_gammas.npy'))
 print('\nfinal gammas\n', gammas)
 
-# # 1. 三个状态各自的子图，如下：
-# compute_and_plot_three_ROCs(gammas, hidden_states)
-
-# 2. 多类别的 ROC 图，如下：
 compute_and_plot_multiclass_ROC(gammas, hidden_states)
-
-# --------------------画图---------------------------------------------------------------------------------
-
-# 隐藏状态区分结果检验(F1 AUC画图替代)
 _ = result_verification(hidden_states, most_likely_hidden_state)
-# 隐藏状态区分结果画图(条带)
 hidden_state_differentiation_chart(hidden_states, most_likely_hidden_state)
+_ = F1_score__Confusion_Matrix__ARI(hidden_states, most_likely_hidden_state)
+plot_3d_macro_micro_F1(hidden_states, observed_states, new_params['observed_weights'], numb=5)
 
-# # 事件区分图（月份条形图）
-# hidden_state_monthly_accuracy_chart(hidden_states, most_likely_hidden_state, months, years)
-
-# F1 AUC画图
-f1_scores = []
-f1_scores = F1_score__Confusion_Matrix__ARI(hidden_states, most_likely_hidden_state)
-
-# 三维图像，联合调整全局权重 v 与观测值权重 w，F1 Score
-# 设置取样密度
-numb1 = 5
-plot_3d_macro_micro_F1(hidden_states, observed_states, new_params['observed_weights'], numb1)
-
-# --------------------预测---------------------------------------------------------------------------------
-
-# # 预测
-# # 读取数据与历史数据
-# _, future_hidden_states, _, _, _ = Get_observed_and_hidden_state("D:\Desktop\预测.xls")
-# fit_future_hidden_states, report = forecast_weather_markov(
-#     final_transition_matrices,
-#     last_hidden_state=(0, 0),
-#     n_hours=24,
-#     future_hidden_states=future_hidden_states,
-#     global_weight=global_weight,
-#     observed_weights=new_params['observed_weights'],
-#     final_mus=final_mus,
-# )
-#
-# print("预测标签:", fit_future_hidden_states)                       # 来自函数返回值
-# print("实际标签:", future_hidden_states[:len(fit_future_hidden_states)])  # 确保长度一致
-# print("评估结果:", report)
-
-# --------------------随机森林/支持向量机 结果对比---------------------------------------------------------------------------------
-
-# # === 2. 数据准备 ===
-# X_train, y_train = build_train_set_by_ratio(histr_observed_states,
-#                                             histr_hidden_states,
-#                                             ratio=0.30)
-#
-# X_test  = observed_states.T     # 新数据：时间已是 旧 → 新
-# y_test  = hidden_states
-# all_possible_labels = np.unique(y_test)
-# label_map = {0: '晴朗', 1: '雾霾', 2: '沙尘'}
-#
-# # === 3. 模型训练与时序外评估 ===
-# print("\n########## 开始模型训练与单次时序外（out-of-time）评估 ##########")
-#
-# # -- 随机森林 --
-# rf_model = RandomForestClassifier(
-#     n_estimators=100,
-#     random_state=42,
-#     class_weight='balanced',
-#     n_jobs=-1
-# )
-# rf_model.fit(X_train, y_train)
-# y_pred_rf  = rf_model.predict(X_test)
-# y_prob_rf  = rf_model.predict_proba(X_test)
-# evaluate_and_plot(y_test, y_pred_rf, y_prob_rf, "Random Forest", all_possible_labels)
-#
-# # -- 支持向量机 --
-# scaler = StandardScaler()
-# X_train_scaled = scaler.fit_transform(X_train)
-# X_test_scaled  = scaler.transform(X_test)
-#
-# svm_model = SVC(
-#     kernel='rbf',
-#     class_weight='balanced',
-#     probability=True,
-#     random_state=42
-# )
-# svm_model.fit(X_train_scaled, y_train)
-# y_pred_svm  = svm_model.predict(X_test_scaled)
-# y_prob_svm  = svm_model.predict_proba(X_test_scaled)
-# evaluate_and_plot(y_test, y_pred_svm, y_prob_svm, "Support Vector Machine (SVM)", all_possible_labels)
-#
-# # === 4. 汇总报告 ===
-# generate_comprehensive_report(y_test, y_pred_rf,  all_possible_labels, "Random Forest")
-# generate_comprehensive_report(y_test, y_pred_svm, all_possible_labels, "Support Vector Machine (SVM)")
-
-# 显示运行时间
 end_time = time.time()
-print('\n', f"代码执行时间: {end_time - start_time:.6f} 秒")
+print('\n', f"Runtime: {end_time - start_time:.6f} s")
